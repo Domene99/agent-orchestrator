@@ -71,21 +71,24 @@ func ensureDrunMCPServer(settingsPath string) error {
 
 	changed := false
 
-	// mcpServers: ensure "drun" → {type: "sse", url: drunSSEURL}
+	// mcpServers: ensure "drun" → {type: "http", url: drunMCPURL, headers: ...}
+	// Always overwrite so stale entries (e.g. old "sse" transport) get upgraded.
 	mcpServers := map[string]any{}
 	if raw, ok := root["mcpServers"]; ok {
 		_ = json.Unmarshal(raw, &mcpServers)
 	}
-	if _, exists := mcpServers[drunMCPServerName]; !exists {
-		mcpServers[drunMCPServerName] = map[string]any{
-			"type": "http",
-			"url":  drunMCPURL,
-			// drun-mcp requires both content types in Accept; without
-			// text/event-stream it returns 406 per MCP streamable-HTTP spec.
-			"headers": map[string]string{
-				"Accept": "application/json, text/event-stream",
-			},
-		}
+	want := map[string]any{
+		"type": "http",
+		"url":  drunMCPURL,
+		// drun-mcp requires both content types in Accept; without
+		// text/event-stream it returns 406 per MCP streamable-HTTP spec.
+		"headers": map[string]string{
+			"Accept": "application/json, text/event-stream",
+		},
+	}
+	existing, exists := mcpServers[drunMCPServerName]
+	if !exists || !drunEntryMatches(existing, want) {
+		mcpServers[drunMCPServerName] = want
 		b, _ := json.Marshal(mcpServers)
 		root["mcpServers"] = b
 		changed = true
@@ -106,6 +109,17 @@ func ensureDrunMCPServer(settingsPath string) error {
 		}
 	}
 	return nil
+}
+
+// drunEntryMatches returns true when the existing mcpServers["drun"] entry already
+// has the correct type and URL, so we avoid unnecessary writes.
+func drunEntryMatches(existing, want any) bool {
+	e, ok := existing.(map[string]any)
+	if !ok {
+		return false
+	}
+	w := want.(map[string]any)
+	return e["type"] == w["type"] && e["url"] == w["url"]
 }
 
 // UninstallHooks removes AO's Claude Code hooks, leaving user-defined hooks untouched.
