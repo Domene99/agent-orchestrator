@@ -31,7 +31,7 @@ AI coding agents become much more useful when they can work in parallel, but par
 Agent Orchestrator is built to keep that loop visible and manageable. It helps you:
 
 - Start multiple agents from the same project without mixing their work
-- Keep every session in a separate git worktree
+- Keep every session in a separate git worktree with an isolated drun sandbox
 - See which agents are working, waiting, finished, or blocked
 - Route CI failures, review comments, and merge conflicts back to the right session
 - Use different agent CLIs through one common supervisor
@@ -42,12 +42,14 @@ At a high level, Agent Orchestrator follows a simple loop:
 
 1. Add a project you want agents to work on.
 2. Start one or more sessions from the desktop app or CLI.
-3. AO creates an isolated git worktree for each session.
+3. AO creates an isolated git worktree and a paired [drun](https://github.com/dmosc/drun) sandbox session for each agent. File and shell operations are routed through drun-mcp MCP tools, keeping each agent's changes contained to its own session.
 4. AO launches the selected coding agent in that session's terminal runtime.
 5. The local daemon watches session state, terminal activity, pull requests, CI, and review feedback.
 6. The desktop app and CLI show the current state and let you send follow-up instructions to the right session.
 
 The result is a local control layer for agentic coding: agents still do the coding, while Agent Orchestrator keeps their workspaces, status, terminals, and feedback loops organized.
+
+**drun is bundled automatically.** The `ao` daemon ships with `drun-mcp` embedded — no separate installation required. On first start the daemon extracts it to `~/.ao/bin/drun-mcp` and registers it as an MCP server in your Claude Code config (`~/.claude.json`), so it is available to every Claude Code session without any manual setup. Session sandbox state survives daemon restarts via snapshots stored under `~/.ao`.
 
 ## Features
 
