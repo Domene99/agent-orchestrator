@@ -2,6 +2,7 @@ package drun
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -81,6 +82,9 @@ func (s *Server) Client() *Client { return s.client }
 func (s *Server) Start(ctx context.Context) error {
 	if err := s.probeAlive(ctx); err == nil {
 		s.log.Info("drun-mcp already running, reusing")
+		if err := s.registerWithClaudeCode(); err != nil {
+			s.log.Warn("drun: could not register MCP server with Claude Code", "err", err)
+		}
 		return nil
 	}
 
@@ -115,6 +119,9 @@ func (s *Server) Start(ctx context.Context) error {
 	for time.Now().Before(deadline) {
 		if err := s.probeAlive(ctx); err == nil {
 			s.log.Info("drun-mcp ready")
+			if err := s.registerWithClaudeCode(); err != nil {
+				s.log.Warn("drun: could not register MCP server with Claude Code", "err", err)
+			}
 			return nil
 		}
 		select {
@@ -124,6 +131,60 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 	return fmt.Errorf("drun-mcp did not become ready within 10s")
+}
+
+// registerWithClaudeCode ensures drun is registered as a user-scoped MCP server
+// in ~/.claude.json. This writes at the top level (above any project entry), so
+// per-project mcpServers overrides can never shadow it. It is idempotent: if the
+// entry already has the right type and URL it returns without writing.
+func (s *Server) registerWithClaudeCode() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	claudeJSON := filepath.Join(home, ".claude.json")
+
+	data, _ := os.ReadFile(claudeJSON)
+	root := map[string]json.RawMessage{}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &root); err != nil {
+			return fmt.Errorf("parse %s: %w", claudeJSON, err)
+		}
+	}
+
+	servers := map[string]any{}
+	if raw, ok := root["mcpServers"]; ok {
+		_ = json.Unmarshal(raw, &servers)
+	}
+
+	want := map[string]any{
+		"type": "http",
+		"url":  DefaultMCPURL,
+		// drun-mcp requires text/event-stream in Accept or returns 406.
+		"headers": map[string]string{
+			"Accept": "application/json, text/event-stream",
+		},
+	}
+	if existing, ok := servers["drun"].(map[string]any); ok {
+		if existing["type"] == "http" && existing["url"] == DefaultMCPURL {
+			return nil // already correct
+		}
+	}
+
+	servers["drun"] = want
+	b, _ := json.Marshal(servers)
+	root["mcpServers"] = b
+
+	out, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	out = append(out, '\n')
+	if err := os.WriteFile(claudeJSON, out, 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", claudeJSON, err)
+	}
+	s.log.Info("drun: registered MCP server in ~/.claude.json (user scope)")
+	return nil
 }
 
 // Stop signals the managed subprocess to exit. If drun-mcp was already
