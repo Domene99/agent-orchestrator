@@ -91,8 +91,33 @@ goexe="$(go env GOEXE)"
 binary_name="ao${goexe}"
 binary_path="${build_dir}/${binary_name}"
 
+# ---------------------------------------------------------------------------
+# Bundle drun-mcp inside the ao binary so users install one thing.
+# If the drun repo is not present or cargo is not installed, ao is still built
+# but without the sandbox (sessions fall back to plain git worktrees).
+# ---------------------------------------------------------------------------
+drun_embed_dir="${backend_dir}/internal/drun/binaries"
+drun_embed_target="${drun_embed_dir}/drun-mcp"
+go_build_tags=""
+
+# Locate the drun repo: sibling of agent-orchestrator, or DRUN_REPO_PATH override.
+drun_repo="${DRUN_REPO_PATH:-${repo_root}/../drun}"
+
+if [[ -d "${drun_repo}" ]] && command -v cargo >/dev/null 2>&1; then
+  printf 'Building drun-mcp from %s\n' "${drun_repo}"
+  (cd "${drun_repo}" && cargo build --release -p drun-mcp)
+  mkdir -p "${drun_embed_dir}"
+  cp "${drun_repo}/target/release/drun-mcp" "${drun_embed_target}"
+  chmod +x "${drun_embed_target}"
+  go_build_tags="-tags bundled_drun"
+  printf 'drun-mcp bundled into ao\n'
+else
+  printf 'drun repo not found or cargo unavailable; building ao without bundled drun-mcp\n'
+fi
+
 mkdir -p "${build_dir}"
-(cd "${backend_dir}" && go build -o "${binary_path}" ./cmd/ao)
+# shellcheck disable=SC2086  # intentional word-split for go_build_tags
+(cd "${backend_dir}" && go build ${go_build_tags} -o "${binary_path}" ./cmd/ao)
 
 if ! install_dir="$(select_install_dir)"; then
   printf 'Could not find a writable directory on PATH for ao\n' >&2

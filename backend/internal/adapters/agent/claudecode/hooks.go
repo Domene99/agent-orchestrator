@@ -2,9 +2,13 @@ package claudecode
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/hooksjson"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/hookutil"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -13,6 +17,10 @@ const (
 	claudeSettingsFileName  = "settings.local.json"
 	claudeHookCommandPrefix = "ao hooks claude-code "
 	claudeHookTimeout       = 30
+	// drunMCPServerName is the key used in Claude Code's mcpServers map.
+	drunMCPServerName = "drun"
+	// drunMCPURL is the drun-mcp Streamable HTTP endpoint Claude Code connects to.
+	drunMCPURL = "http://127.0.0.1:7273/mcp"
 )
 
 // claudeStartupMatcher is referenced by pointer so SessionStart serializes with
@@ -42,9 +50,62 @@ func claudeSettingsPath(workspacePath string) string {
 	return filepath.Join(workspacePath, claudeSettingsDirName, claudeSettingsFileName)
 }
 
-// GetAgentHooks installs AO's Claude Code hooks, preserving user-defined hooks and unrelated settings.
+// GetAgentHooks installs AO's Claude Code hooks and wires the drun MCP server
+// into settings.local.json so the agent can use drun sandbox tools.
 func (p *Plugin) GetAgentHooks(ctx context.Context, cfg ports.WorkspaceHookConfig) error {
-	return claudeHooks.Install(ctx, cfg.WorkspacePath)
+	if err := claudeHooks.Install(ctx, cfg.WorkspacePath); err != nil {
+		return err
+	}
+	return ensureDrunMCPServer(claudeSettingsPath(cfg.WorkspacePath))
+}
+
+// ensureDrunMCPServer merges the drun MCP server entry into settings.local.json
+// and ensures the required permissions are in place. It is idempotent.
+func ensureDrunMCPServer(settingsPath string) error {
+	root := map[string]json.RawMessage{}
+	if data, err := os.ReadFile(settingsPath); err == nil && len(data) > 0 {
+		if jsonErr := json.Unmarshal(data, &root); jsonErr != nil {
+			return fmt.Errorf("claude-code: parse %s: %w", settingsPath, jsonErr)
+		}
+	}
+
+	changed := false
+
+	// mcpServers: ensure "drun" → {type: "sse", url: drunSSEURL}
+	mcpServers := map[string]any{}
+	if raw, ok := root["mcpServers"]; ok {
+		_ = json.Unmarshal(raw, &mcpServers)
+	}
+	if _, exists := mcpServers[drunMCPServerName]; !exists {
+		mcpServers[drunMCPServerName] = map[string]any{
+			"type": "http",
+			"url":  drunMCPURL,
+			// drun-mcp requires both content types in Accept; without
+			// text/event-stream it returns 406 per MCP streamable-HTTP spec.
+			"headers": map[string]string{
+				"Accept": "application/json, text/event-stream",
+			},
+		}
+		b, _ := json.Marshal(mcpServers)
+		root["mcpServers"] = b
+		changed = true
+	}
+
+	// permissions: ensure mcp__drun__* is allowed.
+	if changed {
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+			return fmt.Errorf("claude-code: create settings dir: %w", err)
+		}
+		data, err := json.MarshalIndent(root, "", "  ")
+		if err != nil {
+			return fmt.Errorf("claude-code: encode settings: %w", err)
+		}
+		data = append(data, '\n')
+		if err := hookutil.AtomicWriteFile(settingsPath, data, 0o600); err != nil {
+			return fmt.Errorf("claude-code: write settings: %w", err)
+		}
+	}
+	return nil
 }
 
 // UninstallHooks removes AO's Claude Code hooks, leaving user-defined hooks untouched.

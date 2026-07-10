@@ -56,6 +56,9 @@ const (
 	EnvIssueID   = "AO_ISSUE_ID"
 	// EnvDataDir tells a spawned agent's AO hook commands where the store lives.
 	EnvDataDir = "AO_DATA_DIR"
+	// EnvDrunSessionID carries the drun session the agent should route all file
+	// and bash operations through. Set when the drunworktree adapter is active.
+	EnvDrunSessionID = "DRUN_SESSION_ID"
 )
 
 // hookBinaryName is the executable name the workspace hook commands invoke:
@@ -239,6 +242,12 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		// in session lists (e.g. when gitworktree refuses the branch).
 		m.rollbackSpawnSeedRow(ctx, id)
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: workspace: %w", id, err)
+	}
+
+	// When a drun session backs this workspace, append sandbox instructions to
+	// the system prompt so the agent uses drun tools instead of native tools.
+	if ws.DrunSessionID != "" {
+		systemPrompt = appendDrunInstructions(systemPrompt, ws.DrunSessionID)
 	}
 
 	// Per-project workspace provisioning: symlink shared files, then run any
@@ -1697,6 +1706,14 @@ func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueI
 // logged so the degradation isn't silent.
 func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string) map[string]string {
 	env := spawnEnv(id, project, issue, m.dataDir, projectEnv)
+	// Inject the drun session ID when the drunworktree adapter is in use.
+	if dw, ok := m.workspace.(interface {
+		GetDrunSessionID(domain.SessionID) string
+	}); ok {
+		if drunID := dw.GetDrunSessionID(id); drunID != "" {
+			env[EnvDrunSessionID] = drunID
+		}
+	}
 	path, err := HookPATH(m.executable, os.Getenv, projectEnv)
 	if err != nil {
 		m.logger.Warn("session PATH not pinned to the daemon binary; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall",
@@ -1735,6 +1752,24 @@ func HookPATH(executable func() (string, error), getenv func(string) string, pro
 		return dir, nil
 	}
 	return dir + string(os.PathListSeparator) + base, nil
+}
+
+// appendDrunInstructions appends a short system-prompt section that tells the
+// agent to route all file and bash operations through drun rather than native
+// tools. Called only when a drun session backs the current workspace.
+func appendDrunInstructions(systemPrompt, drunSessionID string) string {
+	instructions := "\n\n## Sandbox (drun)\n\n" +
+		"This session runs inside a drun sandbox. Your drun session ID is `" + drunSessionID + "`.\n" +
+		"The project files are already mounted. Use drun MCP tools for ALL file and shell operations:\n" +
+		"- `session_bash` instead of Bash\n" +
+		"- `session_write_file` / `session_read_file` / `session_delete_file` instead of Edit/Write/Read\n" +
+		"- `session_mount` to pull in additional host paths\n" +
+		"- `session_diff` / `session_rollback` / `session_fork` to inspect and branch history\n\n" +
+		"Do NOT use native Bash, Edit, Write, Read, Glob, or Grep tools — they bypass the sandbox."
+	if systemPrompt == "" {
+		return instructions
+	}
+	return systemPrompt + instructions
 }
 
 // provisionWorkspace applies the project's per-workspace setup after the

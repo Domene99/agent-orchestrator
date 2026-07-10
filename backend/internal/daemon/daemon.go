@@ -17,6 +17,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/daemon/supervisor"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/drun"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
@@ -119,11 +120,19 @@ func Run() error {
 	lcStack := startLifecycle(ctx, store, runtimeAdapter, messenger, notificationWriter, telemetrySink, log)
 	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, log)
 
+	// Start the drun-mcp sandbox server. ao manages it as a subprocess; if it
+	// is already running (e.g. started by a previous daemon) the start is a no-op.
+	// A failure is non-fatal: sessions fall back to unsandboxed gitworktrees.
+	drunSrv := drun.NewServer(cfg.DataDir, log)
+	if err := drunSrv.Start(ctx); err != nil {
+		log.Warn("drun-mcp unavailable; sessions will run unsandboxed (install drun-mcp to enable sandboxing)", "err", err)
+	}
+	defer drunSrv.Stop()
+
 	// Wire the controller-facing session service over the same store + LCM, the
-	// selected runtime, a gitworktree workspace, the per-session agent resolver
-	// (AO_AGENT validated here for compatibility), and the agent messenger, then mount it
-	// on the API.
-	sessionSvc, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, log)
+	// selected runtime, a drunworktree workspace (gitworktree + drun sandbox),
+	// the per-session agent resolver, and the agent messenger, then mount on the API.
+	sessionSvc, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, drunSrv, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()

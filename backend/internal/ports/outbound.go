@@ -206,6 +206,9 @@ type WorkspaceInfo struct {
 	// when the normal workspace lifecycle primitives operate on one child repo
 	// inside a workspace project.
 	RepoPath string
+	// DrunSessionID is the drun session that shadows this worktree. Empty when
+	// the drun workspace adapter is not in use.
+	DrunSessionID string
 }
 
 // WorkspaceProjectConfig describes a multi-repo workspace session. RootRepoPath
